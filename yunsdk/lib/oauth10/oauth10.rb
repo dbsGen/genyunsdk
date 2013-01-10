@@ -1,74 +1,88 @@
-require 'net/http'
-require 'net/https'
 require 'digest/hmac'
 require 'oauth10/oauth10_tool'
 require 'json'
+require 'tools/request'
 
-class OAuth10
-	attr_accessor :request_path, :oauth_info, :oauth_callback
-	@consumer_key
-	@consumer_secret
+module YunSDK
 
-	def initialize(params = {})
-		@consumer_key = params[:consumer_key]
-		@secret = params[:consumer_secret]
-		@oauth_callback = params[:oauth_callback]
-	end
+	class OAuth10
+		attr_accessor 	:request_path,
+						:access_path,
+						:authorize_path,
+						:oauth_info,
+						:oauth_callback
+		@consumer_key
+	  	@consumer_secret
 
-	def startRequest 
-		response = request(@request_path, 
-					"GET",
-				 	oauth_nonce:nonce,
-					oauth_timestamp:Time.now.to_i,
-				 	oauth_signature_method:"HMAC-SHA1",
-				 	oauth_version:"1.0",
-					oauth_consumer_key:@consumer_key,
-				 	oauth_callback:@oauth_callback)
-
-		result = JSON.parse(response.body)
-		if block_given?
-			yield "https://www.kuaipan.cn/api.php?ac=open&op=authorise&oauth_token=#{result['oauth_token']}"
+		public
+		def initialize(params = {})
+			@consumer_key = params[:consumer_key]
+			@consumer_secret = params[:consumer_secret]
+			@oauth_callback = params[:oauth_callback]
 		end
-	end
 
-	def request(path, method, params = {})
+		def start_request 
+			response = request_oauth10(@request_path, 
+						"GET",
+						nil ,
+					 	oauth_nonce:Request.nonce,
+						oauth_timestamp:Time.now.to_i,
+					 	oauth_signature_method:"HMAC-SHA1",
+					 	oauth_version:"1.0",
+						oauth_consumer_key:@consumer_key,
+					 	oauth_callback:@oauth_callback)
 
-		uri = URI.parse(path)
+			result = JSON.parse(response.body)
+			if result["oauth_token"]	
+				self.oauth_info = result
+				if block_given?
+					yield "#{@authorize_path}#{result['oauth_token']}", result
+				end
+			else
+				if block_given?
+					yield 
+				end
+			end
 
-		http = Net::HTTP.new(uri.host, uri.port)
-		http.use_ssl = true if uri.scheme == 'https'
-
-		params["oauth_signature"] = signature(method, path, params)
-
-		uri.query = URI.encode_www_form(params)
-
-		request = Net::HTTP::Get.new(uri.request_uri)
-
-		http.request(request)
-	end
-
-	#
-	def nonce
-		"#{Time.now.to_i}#{rand}"
-	end
-
-	def signature(method, url, params = {})
-		query_string = ""
-		first = true
-		params.keys.sort.each do |x|
-			add = "#{x.to_s.oauth_encode}=#{params[x].to_s.oauth_encode}"
-			query_string += first ? add : "&#{add}"
-			first = false
 		end
+
+		def request_callback(url)
+			uri = URI.parse(url)
+
+			params = URI.decode_www_form(uri.query)
+
+			token, verifier = Request.parse_uri_query(params, ["oauth_token", "oauth_verifier"]) 
+			
+			if token && verifier && @oauth_info
+				response = request_oauth10(
+							@access_path,
+							"GET",
+							@oauth_info["oauth_token_secret"],
+							oauth_consumer_key:@consumer_key,
+							oauth_signature_method:"HMAC-SHA1",
+							oauth_timestamp:Time.now.to_i,
+							oauth_nonce:Request.nonce,
+							oauth_version:"1.0",
+							oauth_token:token,
+							oauth_verifier:verifier)
+				if block_given?
+					yield JSON.parse(response.body)
+				end 
+			else 
+				if block_given?
+					yield 
+				end
+			end
+		end
+
+		private
+
+		def request_oauth10(path, method, secret, params = {})
+			params["oauth_signature"] = Request.signature(method, path, @consumer_secret ,secret, params)
+			Request.request(path, method, params)
+		end
+
 		
-		data = "#{method}&#{url.oauth_encode}&#{query_string.oauth_encode}"
-
-		begin
-			oauth_secret = "#{@secret}&#{@oauth_info['oauth_token_secret']}"
-		rescue Exception => e
-			oauth_secret = "#{@secret}&"
-		end
-
-		Digest::HMAC.base64digest(data, oauth_secret , Digest::SHA1)
 	end
+
 end
